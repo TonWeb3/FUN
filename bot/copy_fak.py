@@ -474,6 +474,7 @@ async def live_copy(trade: Dict[str, Any], evaluated_price: Optional[float] = No
 
     current_ask = paper
     limit = None
+    last_failed_limit = None
     t_start = time.perf_counter()
     total_filled_shares = 0.0
     total_filled_usd = 0.0
@@ -514,10 +515,10 @@ async def live_copy(trade: Dict[str, Any], evaluated_price: Optional[float] = No
                 current_ask = paper
             else:
                 current_ask = None
-                # Priority 1: WebSocket cache with relaxed age window
+                # Priority 1: WebSocket cache only if genuinely fresh (<= 1.5s) so retries don't reuse stale asks
                 if ws_client:
                     try:
-                        summary = ws_client.get_summary(token_id, max_age_s=15.0)
+                        summary = ws_client.get_summary(token_id, max_age_s=1.5)
                         if summary and summary.get("bestAsk"):
                             current_ask = float(summary["bestAsk"])
                     except Exception:
@@ -547,11 +548,16 @@ async def live_copy(trade: Dict[str, Any], evaluated_price: Optional[float] = No
                 if not current_ask or current_ask <= 0:
                     current_ask = paper or 0.50
 
-            # 3. Progressive slippage sweep (from FAK-main: +1.5¢ per retry up to +8¢ extra)
+            # 3. Progressive slippage sweep (+1.5¢ per retry up to +8¢ extra) + monotonic step-up
+            #    so an unfilled FOK/FAK retry never re-sends the exact same limit that just got killed.
             extra_slip = min(0.08, (attempt_num - 1) * 0.015)
             limit = order_price(current_ask, cfg, extra_slip=extra_slip, settings=settings)
+            if last_failed_limit is not None and limit <= last_failed_limit:
+                max_sweep_limit = order_price(current_ask, cfg, extra_slip=0.08, settings=settings)
+                stepped = min(0.99, round(last_failed_limit + 0.01, 2))
+                limit = min(max_sweep_limit, stepped) if max_sweep_limit > last_failed_limit else stepped
             cap_c = cap_cents_for(current_ask, cfg, settings=settings)
-            effective_slip_c = cap_c + (extra_slip * 100.0)
+            effective_slip_c = max(0.0, (limit - current_ask) * 100.0)
 
             # 4. Sizing: Instant RAM balance lookup and calculate remaining unfilled stake
             balance = float(state.get("live_balance") or 0.0)
@@ -607,6 +613,7 @@ async def live_copy(trade: Dict[str, Any], evaluated_price: Optional[float] = No
                     cur_filled = True
 
             if cur_filled and cur_shares > 0 and cur_usd > 0:
+                last_failed_limit = None
                 fee = book_fill(trade, cur_shares, cur_usd, settings=settings,
                                 state=state, paper=paper, target_usd=target_usd)
                 total_filled_shares += cur_shares
@@ -654,6 +661,7 @@ async def live_copy(trade: Dict[str, Any], evaluated_price: Optional[float] = No
                 continue
 
             # 6. Not filled on this attempt — examine error and retry:
+            last_failed_limit = limit
             err = str(res.get("error") or "unfilled")
             try:
                 err = trader.enrich_order_error(err) or err
