@@ -745,7 +745,7 @@ class BinanceTradeStream(_InBinance):   # TOGGLE: inputs — _InBinance, above, 
         self.last_spot_price = None
         self.last_ts = None
         self.last_source = None
-        self._price_history = []
+        self._price_history = collections.deque()
         self._in_setup()   # TOGGLE: inputs — what the inputs switches keep on this object (_InBinance, above)
         self.closed = False
 
@@ -837,11 +837,13 @@ class BinanceTradeStream(_InBinance):   # TOGGLE: inputs — _InBinance, above, 
         self.last_source = source
 
         if not hasattr(self, "_price_history"):
-            self._price_history = []
+            self._price_history = collections.deque()
         self._price_history.append((now_t, p))
         cutoff = now_t - 60.0
-        if len(self._price_history) > 1200 or (self._price_history and self._price_history[0][0] < cutoff):
-            self._price_history = [(t, pr) for t, pr in self._price_history if t >= cutoff]
+        while self._price_history and self._price_history[0][0] < cutoff:
+            self._price_history.popleft()
+        while len(self._price_history) > 6000:
+            self._price_history.popleft()
 
         if self.on_update:
             try:
@@ -868,7 +870,7 @@ class BinanceTradeStream(_InBinance):   # TOGGLE: inputs — _InBinance, above, 
                 break
         if past_price is None:
             past_price = self._price_history[0][1]
-        return round(float(self.last_price) - float(past_price), 2)
+        return float(self.last_price) - float(past_price)
 
     def get_impulse(self, lookback_s: float = 8.0) -> Optional[float]:
         """Exact Binance spot price change over the last `lookback_s` seconds (current - past).

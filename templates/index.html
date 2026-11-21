@@ -385,7 +385,7 @@
                                                     <span :class="Number(trade.live_profit_loss) > 0 ? 'text-green-400' : (Number(trade.live_profit_loss) < 0 ? 'text-red-400' : 'text-gray-400')"
                                                           x-text="formatUsd(trade.live_profit_loss)"></span>
                                                     <!-- PATCH: fill-and-kill copy — the fee counted in this result, or that the order found nothing at its price -->
-                                                    <div x-show="trade.live_fee || trade.copy_status === 'FAK_MISSED'" class="text-[9px] font-normal text-gray-500 mt-0.5 whitespace-nowrap"
+                                                    <div x-show="trade.live_fee || trade.copy_status === 'FAK_MISSED' || trade.copy_status === 'FOK_MISSED'" class="text-[9px] font-normal text-gray-500 mt-0.5 whitespace-nowrap"
                                                          x-text="trade.live_fee ? ('incl. fee $' + Number(trade.live_fee).toFixed(2)) : ('missed at ' + formatCents(trade.live_limit_price))"></div>
                                                 </div>
                                             </template>
@@ -689,7 +689,7 @@
                         t.kind === 'longshot' ? (t.open_reason === 'longshot_maker' ? 'LONGSHOT_MAKER' : t.open_reason === 'longshot_engine' ? 'LONGSHOT_ENGINE' : 'LONGSHOT') : (t.open_reason === 'flip_entry' ? 'FLIP' : (t.open_reason === 'underdog_entry' ? 'UNDERDOG' : 'EV')),
                         t.paper_entry_price ?? t.entry_price,
                         t.live_entry_price ?? '',
-                        t.amount,
+                        t.paper_amount ?? t.amount ?? '',
                         t.live_amount ?? '',
                         t.live_shares ?? (t.shares || ''),
                         t.exit_reason ? t.exit_reason.toUpperCase() : (t.status === 'VOID' ? 'VOID' : 'SETTLED'),
@@ -699,8 +699,8 @@
                         t.resolution,
                         t.paper_entry_time || t.entry_time,
                         t.live_entry_time || '',
-                        t.paper_exit_time || t.exit_time,
-                        t.live_exit_time || '',
+                        t.paper_closed_time || t.paper_exit_time || t.exit_time || '',
+                        t.live_closed_time || t.live_exit_time || '',
                         t.copy_status || '',
                         t.redeem_status,
                         (t.official && t.official.winner) || '',   // PATCH: official results

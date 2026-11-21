@@ -499,11 +499,11 @@ class MakerManager:
             return "outside the look window"
         if self._win(b.start_ms)["fills"] >= int(mk.get("max_fills_per_window", 1)) and b.filled <= 1e-9:
             return "fill cap reached this window"
-        if b.last_prob < float(mk.get("min_prob", 0.2)) - KEEP_MARGIN:
-            return f"chance {b.last_prob:.3f} under {float(mk.get('min_prob', 0.2)) - KEEP_MARGIN:.2f}"
+        if b.last_prob < float(mk.get("min_prob", 0.55)) - KEEP_MARGIN:
+            return f"chance {b.last_prob:.3f} under {float(mk.get('min_prob', 0.55)) - KEEP_MARGIN:.2f}"
         ask = (self.h.book(b.token_id) or {}).get("best_ask")
-        if ask is not None and float(ask) > float(mk.get("max_ask", 1.0)) + ASK_KEEP_MARGIN + 1e-9:
-            return f"ask {float(ask) * 100:g}¢ over {(float(mk.get('max_ask', 1.0)) + ASK_KEEP_MARGIN) * 100:g}¢"
+        if ask is not None and float(ask) > float(mk.get("max_ask", 0.03)) + ASK_KEEP_MARGIN + 1e-9:
+            return f"ask {float(ask) * 100:g}¢ over {(float(mk.get('max_ask', 0.03)) + ASK_KEEP_MARGIN) * 100:g}¢"
         return "no bid price left (ask at the lowest tick)"
 
     def _summaries(self, now: float) -> None:
@@ -525,7 +525,7 @@ class MakerManager:
                     self.h.log(f"LONGSHOT MAKER {label} window: no bid — follow: {w['follow']}")
                     continue
                 self.h.log(f"LONGSHOT MAKER {label} window: no bid — highest chance {best or '?'} "
-                           f"(needs {float(mk.get('min_prob', 0.2)):.2f})"
+                           f"(needs {float(mk.get('min_prob', 0.55)):.2f})"
                            + (f" — follow: {w['follow']}" if w.get("follow") else ""))   # PATCH: longshot follow
                 continue
             parts = []

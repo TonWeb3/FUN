@@ -46,8 +46,24 @@ def merged(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
+def _as_bool(v: Any, default: bool = False) -> bool:
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(v)
+    if isinstance(v, str):
+        t = v.strip().lower()
+        if t in ("true", "1", "yes", "on"):
+            return True
+        if t in ("false", "0", "no", "off", ""):
+            return False
+    return bool(v)
+
+
 def is_on(cfg: Optional[Dict[str, Any]]) -> bool:
-    return bool((cfg or {}).get("enabled", False))
+    return _as_bool((cfg or {}).get("enabled", False), False)
 
 
 def normalize(new_cfg: Any, existing_cfg: Any = None) -> Dict[str, Any]:
@@ -56,7 +72,7 @@ def normalize(new_cfg: Any, existing_cfg: Any = None) -> Dict[str, Any]:
         return base
     out = dict(base)
     if "enabled" in new_cfg:
-        out["enabled"] = bool(new_cfg["enabled"])
+        out["enabled"] = _as_bool(new_cfg["enabled"], False)
     if "max_price" in new_cfg:
         out["max_price"] = max(0.01, min(0.50, float(new_cfg["max_price"])))
     if "min_prob" in new_cfg:
@@ -66,13 +82,13 @@ def normalize(new_cfg: Any, existing_cfg: Any = None) -> Dict[str, Any]:
     if "max_sigma_distance" in new_cfg:
         out["max_sigma_distance"] = max(0.5, min(10.0, float(new_cfg["max_sigma_distance"])))
     if "momentum_filter" in new_cfg:
-        out["momentum_filter"] = bool(new_cfg["momentum_filter"])
+        out["momentum_filter"] = _as_bool(new_cfg["momentum_filter"], True)
     if "momentum_lookback_s" in new_cfg:
         out["momentum_lookback_s"] = max(1.0, min(60.0, float(new_cfg["momentum_lookback_s"])))
     if "min_book_liquidity_usd" in new_cfg:
         out["min_book_liquidity_usd"] = max(1.0, float(new_cfg["min_book_liquidity_usd"]))
     if "tp_sl_enabled" in new_cfg:
-        out["tp_sl_enabled"] = bool(new_cfg["tp_sl_enabled"])
+        out["tp_sl_enabled"] = _as_bool(new_cfg["tp_sl_enabled"], True)
     if "take_profit_cents" in new_cfg:
         out["take_profit_cents"] = max(5.0, min(99.0, float(new_cfg["take_profit_cents"])))
     if "stop_loss_pct" in new_cfg:

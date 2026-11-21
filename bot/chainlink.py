@@ -41,7 +41,10 @@ class ChainlinkFetcher:
         if not rpcs:
             return {"price": None, "updatedAt": None, "source": "missing_config"}
 
-        aggregator_address = settings.CHAINLINK_BTC_USD_AGGREGATOR
+        aggregator_address = settings.get_aggregator(settings.SYMBOL)
+        if getattr(self, "_last_aggregator", None) != aggregator_address:
+            self._last_aggregator = aggregator_address
+            self.cached_decimals = None
         for rpc in rpcs:
             try:
                 w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc, request_kwargs={'timeout': 3.0}))

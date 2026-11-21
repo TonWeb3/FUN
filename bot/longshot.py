@@ -208,6 +208,15 @@ def normalize(user_cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             num(mk, "min_prob", "maker.min_prob", 0.01, 0.99)
         if "max_ask" in mk:
             num(mk, "max_ask", "maker.max_ask", 0.001, 0.50)
+        if "require_open_pos" in mk:
+            v = mk["require_open_pos"]
+            if isinstance(v, str):
+                v = {"true": True, "on": True, "yes": True, "1": True,
+                     "false": False, "off": False, "no": False, "0": False}.get(v.strip().lower(), v)
+            if v in (True, False):
+                mk["require_open_pos"] = bool(v)
+            else:
+                errs.append("maker.require_open_pos must be true or false")
 
     bands = cfg.get("bands")
     if isinstance(bands, dict):
@@ -216,8 +225,12 @@ def normalize(user_cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
                 if "ask_min" in b: num(b, "ask_min", f"{name}.ask_min", 0, 1)
                 if "ask_max" in b: num(b, "ask_max", f"{name}.ask_max", 0, 1)
                 if "max_price" in b: num(b, "max_price", f"{name}.max_price", 0, 1)
-                if "ask_min" in b and "ask_max" in b and float(b["ask_min"]) > float(b["ask_max"]):
-                    errs.append(f"{name}: ask_min is above ask_max")
+                if "ask_min" in b and "ask_max" in b:
+                    try:
+                        if float(b["ask_min"]) > float(b["ask_max"]):
+                            errs.append(f"{name}: ask_min is above ask_max")
+                    except (TypeError, ValueError):
+                        pass
 
     if errs:
         raise ValueError("; ".join(errs))
@@ -276,9 +289,9 @@ def max_look_s(cfg: Dict[str, Any]) -> float:
 
 
 # PATCH: longshot maker — the checks run while either the bands or the maker bids look
-def sniper_on(cfg: Dict[str, Any]) -> bool:
+def sniper_on(cfg: Optional[Dict[str, Any]]) -> bool:
     """PATCH: longshot strategies — the final-minute sniper buys are on (longshot.sniper_enabled)."""
-    return bool(cfg.get("sniper_enabled", True))
+    return bool((cfg or {}).get("sniper_enabled", True))
 
 
 def any_on(cfg: Optional[Dict[str, Any]] = None) -> bool:
@@ -340,10 +353,11 @@ def engine_order_price(ask: float, cfg: Optional[Dict[str, Any]] = None) -> floa
     return round(min(0.99, max(0.001, px)), 3)
 
 
-def maker_on(cfg: Dict[str, Any]) -> bool:
-    if not cfg.get("maker_enabled", True):          # PATCH: longshot strategies — maker bids switched off
+def maker_on(cfg: Optional[Dict[str, Any]]) -> bool:
+    c = cfg or {}
+    if not c.get("maker_enabled", True):          # PATCH: longshot strategies — maker bids switched off
         return False
-    mk = cfg.get("maker")
+    mk = c.get("maker")
     if not isinstance(mk, dict):
         return False
     return float(mk.get("price", 0.0) or 0.0) > 0

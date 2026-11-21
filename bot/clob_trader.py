@@ -926,7 +926,8 @@ class ClobTrader:
             slip = slippage if slippage is not None else settings.CLOB_MAX_SLIPPAGE
             limit = min(0.99, float(price) + slip) if price and price > 0 else 0
             cfg_fak = getattr(settings, "COPY_FAK", {}) or {}
-            cfg_ot = str(cfg_fak.get("order_type") or "").upper() if isinstance(cfg_fak, dict) else ""
+            cfg_fak_on = bool(cfg_fak.get("enabled", True)) if isinstance(cfg_fak, dict) else False
+            cfg_ot = str(cfg_fak.get("order_type") or "").upper() if cfg_fak_on else ""
             default_ot = OrderType.FAK if getattr(settings, "CLOB_ALLOW_PARTIAL_FILL", True) else OrderType.FOK
             if order_type is not None:
                 ot_str = str(getattr(order_type, "value", order_type)).upper()

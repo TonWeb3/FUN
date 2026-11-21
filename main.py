@@ -139,6 +139,7 @@ def _update_trade_unrealized_pl(trade: Dict[str, Any], market_prices: Optional[D
         try:
             mark_px = float(mark_px)
             trade["live_mark_price"] = mark_px
+            trade["paper_mark_price"] = mark_px
 
             # Live unrealized P/L
             if trade.get("live_status") == "FILLED" and trade.get("live_shares"):
@@ -2459,6 +2460,10 @@ async def execute_trade(decision: Dict[str, Any], market_prices: Dict[str, Any],
 
     cur_mkt_id = str(market.get("id") or "")
     cur_slug = str(market.get("slug") or "")
+    if kind == "regular" and _le_on() and _le_kind(decision, market_prices, market) == "longshot":
+        decision = _le_decision(decision, market_prices, market)
+        kind = "longshot"
+        open_reason = "longshot_engine"
     is_ls = kind == "longshot"  # PATCH: longshot
     ls_cfg = settings.LONGSHOT if is_ls else {}
     slot_keys = _slot_keys(market, kind)
@@ -2473,14 +2478,15 @@ async def execute_trade(decision: Dict[str, Any], market_prices: Dict[str, Any],
                     or (window_start_ms is not None and t.get("window_start_ms") == int(window_start_ms)))
 
         if is_ls:
-            # Enforce: regular trade MUST have been placed before any longshot
-            has_reg = any(
-                not _is_longshot(t) and _same_window(t)
-                for t in (state.get("active_trades", []) + state.get("trade_history", []))
-            )
-            if not has_reg:
-                log_message(f"LONGSHOT skipped: regular trade must happen before longshot in this window.")
-                return "no_regular_trade"
+            if not longshot.is_aggressive(ls_cfg):
+                # SAFE mode: regular trade MUST have been placed before any longshot
+                has_reg = any(
+                    not _is_longshot(t) and _same_window(t)
+                    for t in (state.get("active_trades", []) + state.get("trade_history", []))
+                )
+                if not has_reg:
+                    log_message(f"LONGSHOT skipped: regular trade must happen before longshot in this window.")
+                    return "no_regular_trade"
 
             if longshot.one_at_a_time_on(ls_cfg):
                 # Exclusive mode: strictly ONE longshot strategy per window
@@ -2502,7 +2508,7 @@ async def execute_trade(decision: Dict[str, Any], market_prices: Dict[str, Any],
                 if not _is_longshot(t) and _same_window(t):
                     return "slot_busy"
 
-        if state["withdraw_state"] == "in_progress":
+        if state["withdraw_state"] == "in_progress" or (state["withdraw_state"] == "cooldown" and not settings.WITHDRAW_AUTO_RESUME):
             return "withdraw_in_progress"
 
         if strike_open is None:
@@ -2785,10 +2791,12 @@ async def maybe_flip_position(decision: Dict[str, Any], poly_snapshot: Dict[str,
 
 async def maybe_tp_sl(poly_snapshot: Dict[str, Any], ud_cfg: Optional[Dict[str, Any]] = None):
     """Strategy B: Convexity Scalper / Early Exit (TP/SL).
+    Only active when Underdog Reversal Strategy is enabled AND tp_sl_enabled is True,
+    and only applies to trades opened by the Underdog strategy.
     Closes the open position when its bid reaches take_profit_cents or stop_loss_pct of stake.
     Locks the market until the window rolls over. Works on BOTH 5m and 15m timeframes."""
     cfg = ud_cfg if ud_cfg is not None else underdog.merged(settings.UNDERDOG)
-    if not cfg.get("tp_sl_enabled", True) or not state.get("active_trades"):
+    if not underdog.is_on(cfg) or not cfg.get("tp_sl_enabled", True) or not state.get("active_trades"):
         return None
     if not poly_snapshot.get("ok") or not poly_snapshot.get("market"):
         return None
@@ -2799,6 +2807,8 @@ async def maybe_tp_sl(poly_snapshot: Dict[str, Any], ud_cfg: Optional[Dict[str, 
     if not cur_trades:
         return None
     trade = cur_trades[0]
+    if trade.get("phase") != "UNDERDOG" and trade.get("open_reason") != "underdog_entry":
+        return None
 
     held_key = "up" if trade.get("side") == "UP" else "down"
     ob = (poly_snapshot.get("orderbook") or {}).get(held_key) or {}
@@ -2818,8 +2828,9 @@ async def maybe_tp_sl(poly_snapshot: Dict[str, Any], ud_cfg: Optional[Dict[str, 
     hit = None
     tp_cents = float(cfg.get("take_profit_cents", 25.0) or 25.0)
     sl_pct = float(cfg.get("stop_loss_pct", 50.0) or 50.0)
+    entry_px = float(trade.get("paper_entry_price") or trade.get("entry_price") or 0.0)
 
-    if tp_cents > 0 and (exit_price * 100.0) >= tp_cents:
+    if tp_cents > 0 and (exit_price * 100.0) >= tp_cents and (entry_px <= 0 or exit_price > entry_px):
         hit = "take_profit"
     elif sl_pct > 0 and pl_pct <= -sl_pct:
         hit = "stop_loss"
@@ -3699,6 +3710,8 @@ async def maybe_auto_withdraw(equity: float, poly_snapshot: Dict[str, Any]):
     if not settings.AUTO_WITHDRAW_ENABLED:
         state["withdraw_state"] = "idle"
         return
+    if (getattr(settings, "MODE", "paper") or "paper").lower() == "paper":
+        return
     if not settings.PRIVATE_KEY:
         return
     raw_dest = (settings.WITHDRAW_ADDRESS or "").strip()
@@ -3755,6 +3768,10 @@ async def maybe_auto_withdraw(equity: float, poly_snapshot: Dict[str, Any]):
     elif st == "cooldown":
         resume_after = (settings.WITHDRAW_RESUME_AFTER or "flat").lower()
         if not settings.WITHDRAW_AUTO_RESUME:
+            if state.get("running"):
+                state["running"] = False
+                _reflect_running_now()
+                log_message("CAPITAL EXTRACTOR: Auto-resume is OFF — trading paused after withdrawal.")
             return
 
         can_resume = False
@@ -3793,6 +3810,9 @@ def entry_block_reason(ctx: Dict[str, Any]) -> Optional[str]:
     timing = get_candle_window_timing(settings.CANDLE_WINDOW_MINUTES)
     if _sms is not None and int(_sms) != int(timing["startMs"]):
         return "window_expired"
+
+    if underdog.is_on(settings.UNDERDOG) and _mid and state.get("tp_sl_locked_market") == _mid:
+        return "tp_sl_locked"
 
     # PATCH: longshot engine (Longshot 2: AGGRESSIVE) — a window whose regular slot is taken is still checked while its
     # long-shot slot is free (the engine may take a long shot there; evaluate_entry drops a regular entry).
@@ -3905,21 +3925,40 @@ async def evaluate_entry(reason: str = "event"):
         if down_ws_sum and down_ws_sum.get("bestAsk"):
             market_down = down_ws_sum["bestAsk"]
 
-        decision = engines.decide_ev({
-            "mcProbUp": fair_up,
-            "priceUp": market_up,
-            "priceDown": market_down,
-            "minProb": settings.MIN_PROB_EV,
-            "evThreshold": settings.EV_THRESHOLD,
-            "maxOddsEnabled": getattr(settings, "MAX_ODDS_ENABLED", False),
-            "maxOddsCents": getattr(settings, "MAX_ODDS_CENTS", 25.0),
-            "rsi": ctx["rsi"],
-            "haExhaustedGreen": ctx["ha_exhausted_green"],
-            "haExhaustedRed": ctx["ha_exhausted_red"],
-            "impulse": binance_stream.get_impulse(engines.IMPULSE_LOOKBACK_S),
-            "spotPrice": spot_price,
-            "sigmaPerSqrtS": sigma_s,
-        })
+        ud_cfg = underdog.merged(settings.UNDERDOG)
+        if underdog.is_on(ud_cfg):
+            spot_momentum = binance_stream.get_momentum(ud_cfg.get("momentum_lookback_s", 10.0))
+            decision = underdog.decide({
+                "mcProbUp": fair_up,
+                "priceUp": market_up,
+                "priceDown": market_down,
+                "spotPrice": spot_price,
+                "strikePrice": ctx["strike_open"],
+                "sigma1m": ctx.get("sigma_1m"),
+                "timeLeftMin": tau_s / 60.0,
+                "momentum": spot_momentum,
+                "maxUnderdogPrice": ud_cfg.get("max_price", 0.07),
+                "minUnderdogProb": ud_cfg.get("min_prob", 0.10),
+                "minUnderdogEv": ud_cfg.get("min_ev", 0.02),
+                "maxSigmaDistance": ud_cfg.get("max_sigma_distance", 2.0),
+                "momentumFilter": ud_cfg.get("momentum_filter", True),
+            })
+        else:
+            decision = engines.decide_ev({
+                "mcProbUp": fair_up,
+                "priceUp": market_up,
+                "priceDown": market_down,
+                "minProb": settings.MIN_PROB_EV,
+                "evThreshold": settings.EV_THRESHOLD,
+                "maxOddsEnabled": getattr(settings, "MAX_ODDS_ENABLED", False),
+                "maxOddsCents": getattr(settings, "MAX_ODDS_CENTS", 25.0),
+                "rsi": ctx["rsi"],
+                "haExhaustedGreen": ctx["ha_exhausted_green"],
+                "haExhaustedRed": ctx["ha_exhausted_red"],
+                "impulse": binance_stream.get_impulse(engines.IMPULSE_LOOKBACK_S),
+                "spotPrice": spot_price,
+                "sigmaPerSqrtS": sigma_s,
+            })
 
         if _le_on() and _le_block_regular(decision, ctx, market_up, market_down):
             return
@@ -4168,6 +4207,9 @@ async def evaluate_longshot(reason: str = "event"):
                     "rsi": ctx.get("rsi"),
                     "haExhaustedGreen": ctx.get("ha_exhausted_green"),
                     "haExhaustedRed": ctx.get("ha_exhausted_red"),
+                    "impulse": binance_stream.get_impulse(engines.IMPULSE_LOOKBACK_S),
+                    "spotPrice": spot,
+                    "sigmaPerSqrtS": ctx.get("sigma_s"),
                 })
             else:
                 # ── Longshot 2 (AGGRESSIVE): Mini-test price bands model ──
@@ -4915,6 +4957,7 @@ async def update_loop():
                     "strike_source": strike_source,
                     "time_left_min": time_left_min,
                     "sigma_s": sigma_s,
+                    "sigma_1m": sigma_1m,
                     "sigma_5m": sigma_5m,
                     "drift_5m": 0.0,
                     "rsi": rsi_now,
@@ -4947,6 +4990,7 @@ async def update_loop():
                         "built_at": time.time(), "end_ts": ls_end, "start_ms": start_ms,
                         "strike_open": strike_open, "strike_source": strike_source, "target_open": target_open, "use_basis": use_basis,
                         "sigma_s": sigma_s, "sigma_5m": sigma_5m, "drift_5m": 0.0,
+                        "rsi": rsi_now, "ha_exhausted_green": ha_exhausted_green, "ha_exhausted_red": ha_exhausted_red,
                         "prices": poly_snapshot.get("prices", {}), "token_ids": poly_snapshot.get("token_ids", {}),
                         "orderbook": poly_snapshot.get("orderbook", {}), "market": poly_snapshot["market"],
                     }
@@ -4962,7 +5006,7 @@ async def update_loop():
             # Auto-Entry Execution for Active Trading Timeframe
             exec_result = None
             if poly_snapshot.get("ok") and state["running"] and state["withdraw_state"] != "in_progress":
-                tp_sl_hit = await maybe_tp_sl(poly_snapshot, ud_cfg)
+                tp_sl_hit = await maybe_tp_sl(poly_snapshot, ud_cfg) if is_ud_on else None
                 if tp_sl_hit:
                     exec_result = f"tp_sl({tp_sl_hit})"
                 else:
@@ -5183,7 +5227,7 @@ async def update_loop():
                         "prob_up": other_fair_up,
                         "prob_down": 1.0 - other_fair_up,
                         "bias": "BULLISH" if other_fair_up > 0.6 else "BEARISH" if other_fair_up < 0.4 else "NEUTRAL",
-                        "steps": other_mc_steps,
+                        "tau_s": round(other_tau_s, 1),
                         "sigma_5m": sigma_5m,
                     }
                 },
@@ -5260,7 +5304,13 @@ async def update_loop():
                     "symbol": settings.SYMBOL,
                     "candle_window_minutes": settings.CANDLE_WINDOW_MINUTES,
                     "withdraw_state": state["withdraw_state"],
-                    "last_withdrawal": state.get("last_withdrawal")
+                    "last_withdrawal": state.get("last_withdrawal"),
+                    "withdraw": {
+                        "enabled": settings.AUTO_WITHDRAW_ENABLED,
+                        "state": state["withdraw_state"],
+                        "amount": settings.WITHDRAW_AMOUNT,
+                        "trigger_balance": settings.WITHDRAW_TRIGGER_BALANCE,
+                    },
                 },
                 "prices": {
                     "current": current_price,
@@ -6002,6 +6052,17 @@ async def post_settings(new_settings: Dict[str, Any]):
         elif ak:
             lv["alchemy_api_key"] = settings.ALCHEMY_API_KEY
 
+    if isinstance(new_settings.get("telegram"), dict):
+        tg_in = new_settings["telegram"]
+        tg_tok = tg_in.get("bot_token")
+        if tg_tok and "..." in str(tg_tok):
+            tg_in["bot_token"] = settings.TELEGRAM_BOT_TOKEN
+
+    if isinstance(new_settings.get("longshot"), dict):
+        ls_in = new_settings["longshot"]
+        if ls_in.get("order_type") and "sniper_order_type" not in ls_in:
+            ls_in["sniper_order_type"] = str(ls_in["order_type"]).strip().upper()
+
     merged_cfg = deep_merge(existing_cfg, new_settings)
 
     if "mode" in new_settings:
@@ -6097,6 +6158,7 @@ async def post_settings(new_settings: Dict[str, Any]):
         if "retry_interval_ms" in ct: settings.COPY_RETRY_INTERVAL_MS = int(ct["retry_interval_ms"])
         if "max_retries" in ct: settings.COPY_MAX_RETRIES = int(ct["max_retries"])
 
+    _tf_switched = False
     if "trading" in new_settings:
         t = new_settings["trading"]
         raw_sym = str(t.get("symbol") or "").strip().upper()
@@ -6117,6 +6179,7 @@ async def post_settings(new_settings: Dict[str, Any]):
                     asset = sym.replace("USDT", "").replace("USD", "").lower()
                     settings.POLYMARKET_SERIES_ID = _series_for_tf(new_cwm)
                     settings.POLYMARKET_SERIES_SLUG = f"{asset}-up-or-down-{new_cwm}m"
+                    _tf_switched = True
                     state["trade_ctx"] = None
                     state["market_opens"].clear()
                     state["last_window_start"] = None
@@ -6155,9 +6218,10 @@ async def post_settings(new_settings: Dict[str, Any]):
     if "polymarket" in new_settings:
         p = new_settings["polymarket"]
         old_series = settings.POLYMARKET_SERIES_ID
-        settings.POLYMARKET_SERIES_ID = str(p.get("series_id", settings.POLYMARKET_SERIES_ID))
-        if "series_slug" in p:
-            settings.POLYMARKET_SERIES_SLUG = str(p["series_slug"])
+        if not _tf_switched:
+            settings.POLYMARKET_SERIES_ID = str(p.get("series_id", settings.POLYMARKET_SERIES_ID))
+            if "series_slug" in p:
+                settings.POLYMARKET_SERIES_SLUG = str(p["series_slug"])
         settings.POLYMARKET_UP_LABEL = p.get("up_label", settings.POLYMARKET_UP_LABEL)
         settings.POLYMARKET_DOWN_LABEL = p.get("down_label", settings.POLYMARKET_DOWN_LABEL)
         if settings.POLYMARKET_SERIES_ID != old_series:

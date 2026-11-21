@@ -178,8 +178,14 @@ def summarize_order_book(book: Dict, depth_levels: int = 5) -> Dict:
                 best_ask = min(best_ask, p) if best_ask is not None else p
 
     spread = (best_ask - best_bid) if (best_bid is not None and best_ask is not None) else None
-    bid_liquidity = sum((_px_sz(lvl)[1] or 0.0) for lvl in bids[:depth_levels])
-    ask_liquidity = sum((_px_sz(lvl)[1] or 0.0) for lvl in asks[:depth_levels])
+    parsed_bids = [(_px_sz(lvl)) for lvl in bids]
+    parsed_bids = [(p, s or 0.0) for p, s in parsed_bids if p is not None]
+    parsed_bids.sort(key=lambda x: x[0], reverse=True)
+    parsed_asks = [(_px_sz(lvl)) for lvl in asks]
+    parsed_asks = [(p, s or 0.0) for p, s in parsed_asks if p is not None]
+    parsed_asks.sort(key=lambda x: x[0])
+    bid_liquidity = sum(s for _, s in parsed_bids[:depth_levels])
+    ask_liquidity = sum(s for _, s in parsed_asks[:depth_levels])
 
     return {
         "bestBid": best_bid,
