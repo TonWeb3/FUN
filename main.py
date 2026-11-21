@@ -5415,6 +5415,38 @@ async def order_conn_keeper():
         except Exception:
             await asyncio.sleep(5.0)
 
+def _log_active_toggles(tag: str = "STARTUP") -> None:
+    """Log a clear summary of all active modes, model settings, and toggles so the user
+    can immediately verify what is running in the Console Log and logs/app.log."""
+    mode = (getattr(settings, "MODE", "paper") or "paper").upper()
+    risk_unit = "%" if str(settings.RISK_TYPE).lower() == "percent" else " USD fixed"
+    creds = "key loaded" if settings.PRIVATE_KEY else "no key"
+    max_odds = (f"max_odds <= {float(getattr(settings, 'MAX_ODDS_CENTS', 25.0)):g}¢"
+                if getattr(settings, "MAX_ODDS_ENABLED", False) else "max_odds off")
+    flip_txt = (f"on (conv>={settings.FLIP_MIN_CONVICTION*100:.0f}%, >={settings.FLIP_MIN_MINUTES_LEFT:g}m left)"
+                if settings.FLIP_ENABLED else "off")
+    ce_txt = (f"on (trigger ${settings.WITHDRAW_TRIGGER_BALANCE:g}, withdraw ${settings.WITHDRAW_AMOUNT:g}, "
+              f"auto_resume={'on' if settings.WITHDRAW_AUTO_RESUME else 'off'})"
+              if settings.AUTO_WITHDRAW_ENABLED else "off")
+    tg_txt = "on" if settings.TELEGRAM_ENABLED else "off"
+
+    log_message(f"══ ACTIVE CONFIG [{tag}] ══")
+    log_message(f"CORE: mode={mode} ({creds}) | {settings.SYMBOL} {settings.CANDLE_WINDOW_MINUTES}m | "
+                f"risk={settings.RISK_VALUE:g}{risk_unit}")
+    log_message(f"MODEL: zero-drift continuous tau_s + EWMA vol + basis-adjusted spot vs TWAP strike + "
+                f"Binance {engines.IMPULSE_LOOKBACK_S:g}s impulse gate")
+    log_message(f"EV: threshold>={settings.EV_THRESHOLD*100:g}¢ | min_prob>={settings.MIN_PROB_EV*100:g}% | "
+                f"min_liq>=${settings.MIN_BOOK_LIQUIDITY_USD:g} | {max_odds}")
+    log_message(underdog.status_line(settings.UNDERDOG))
+    log_message(longshot.status_line(settings.LONGSHOT))
+    log_message(copy_fak.status_line(settings.COPY_FAK))
+    log_message(f"PROTECTION: flip={flip_txt} | capital_extractor={ce_txt} | telegram={tg_txt}")
+    log_message(polybolt.status_line(settings.PRICE_STREAM))
+    log_message(_or_status_line())
+    log_message(_eq_line())
+    log_message(_in_line() + _in_loop_note())
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     load_state()
@@ -5428,7 +5460,6 @@ async def lifespan(app: FastAPI):
     # Pre-seed full historical kline buffers so indicators are ready on very first render
     await seed_kline_buffers()
 
-    log_message(_eq_line())   # TOGGLE: entry quote log
     # Start all background tasks
     tasks = [
         asyncio.create_task(binance_stream.start()),
@@ -5449,13 +5480,7 @@ async def lifespan(app: FastAPI):
     tasks.append(asyncio.create_task(ls_maker_mgr.run_forever()))  # PATCH: longshot maker
     tasks.append(asyncio.create_task(_or_watch_forever()))  # PATCH: official results
     tasks.append(asyncio.create_task(polybolt_feed.run_forever()))  # PATCH: price stream — it connects only while switched on
-    log_message(polybolt.status_line(settings.PRICE_STREAM))   # PATCH: price stream
-    log_message(_or_status_line())   # PATCH: official results
-    log_message(longshot.status_line(settings.LONGSHOT))   # PATCH: longshot strategies — on (and what runs) or off
-    log_message(underdog.status_line(settings.UNDERDOG))   # Strategy: Underdog Reversal — on or off
-
-
-    log_message(_in_line() + _in_loop_note())   # TOGGLE: inputs
+    _log_active_toggles("STARTUP")
     # Pre-warm CLOB trader client & on-chain verification in background thread if private key set
     if settings.PRIVATE_KEY:
         async def _warm_live():
@@ -5617,6 +5642,7 @@ async def start_trading():
     state["running"] = True
     _reflect_running_now()
     log_message("Trading STARTED by user")
+    _log_active_toggles("STARTED")
     await send_telegram("🟢 *Trading STARTED by user*")
     await broadcast_state()
     return {"ok": True, "running": True}
@@ -6324,6 +6350,7 @@ async def post_settings(new_settings: Dict[str, Any]):
     # set it up again first (several network calls). With the one-order copy on, set it up now.
     if settings.PRIVATE_KEY and copy_fak.on(settings.COPY_FAK):
         asyncio.create_task(asyncio.to_thread(clob_trader.ensure_ready))
+    _log_active_toggles("SETTINGS SAVED")
     await broadcast_state()
     return {"status": "ok"}
 
